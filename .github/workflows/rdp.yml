@@ -1,0 +1,281 @@
+name: 🌀 ZUN CLOUD - PUBLIC RDP
+on:
+  workflow_dispatch:
+    inputs:
+      user_id:
+        description: 'User ID'
+        required: true
+      user_email:
+        description: 'User Email'
+        required: true
+
+jobs:
+  deploy:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    
+    steps:
+      - name: 🚀 KHỞI TẠO
+        run: |
+          echo "=================================================="
+          echo "🛡️  ZUN CLOUD - PUBLIC RDP SYSTEM"
+          echo "👤 User: ${{ github.event.inputs.user_id }}"
+          echo "📧 Email: ${{ github.event.inputs.user_email }}"
+          echo "⏰ $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')"
+          echo "=================================================="
+
+      - name: 🔐 TẠO ADMINISTRATOR
+        run: |
+          # Tạo password random
+          $Password = "Admin-" + -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 12 | ForEach-Object {[char]$_})
+          $SecurePassword = ConvertTo-SecureString $Password -AsPlainText -Force
+          
+          # Set password cho Administrator
+          Get-LocalUser -Name "Administrator" | Set-LocalUser -Password $SecurePassword
+          Enable-LocalUser -Name "Administrator"
+          
+          # Lưu vào environment
+          echo "ADMIN_PASSWORD=$Password" >> $env:GITHUB_ENV
+          echo "✅ Administrator password: $Password"
+
+      - name: ⚙️ CẤU HÌNH RDP
+        run: |
+          echo "⚙️ Configuring RDP..."
+          
+          # Bật RDP
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          
+          # Firewall cho RDP
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          
+          # NLA
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
+          
+          echo "✅ RDP configured!"
+
+      - name: 🌐 TẢI VÀ CHẠY KAMI TUNNEL
+        id: tunnel
+        run: |
+          echo "🌐 Downloading kami-tunnel..."
+          
+          # Tải kami-tunnel
+          Invoke-WebRequest -Uri "https://github.com/kami2k1/tunnel/releases/latest/download/kami-tunnel-windows-amd64.tar.gz" -OutFile "kami-tunnel.tar.gz"
+          
+          # Giải nén
+          tar -xzf kami-tunnel.tar.gz
+          
+          echo "🚀 Starting tunnel on port 3389..."
+          
+          # Chạy kami-tunnel (background)
+          Start-Process -FilePath ".\kami-tunnel.exe" -ArgumentList "3389" -WindowStyle Hidden -RedirectStandardOutput "tunnel-output.txt"
+          
+          # Đợi 10 giây để tunnel khởi động
+          Start-Sleep -Seconds 10
+          
+          # Lấy public IP:PORT từ output
+          $TunnelOutput = Get-Content "tunnel-output.txt" -Raw
+          
+          # Parse IP:PORT (ví dụ: "Your public address: 123.45.67.89:12345")
+          if ($TunnelOutput -match "(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+)") {
+            $PublicAddress = $Matches[1]
+            echo "PUBLIC_IP=$PublicAddress" >> $env:GITHUB_OUTPUT
+            echo "PUBLIC_ADDRESS=$PublicAddress" >> $env:GITHUB_ENV
+            echo "✅ Public address: $PublicAddress"
+          } else {
+            # Fallback: Đọc từ API hoặc log
+            $PublicAddress = "Đang cập nhật..."
+            echo "PUBLIC_IP=$PublicAddress" >> $env:GITHUB_OUTPUT
+            echo "⚠️ Không parse được IP, check tunnel-output.txt"
+          }
+
+      - name: 💾 CẬP NHẬT FIREBASE
+        run: |
+          echo "💾 Updating Firebase..."
+          
+          $UserID = "${{ github.event.inputs.user_id }}"
+          $FirebaseURL = "${{ secrets.FIREBASE_URL }}/users/$UserID/vms.json"
+          
+          $VMData = @{
+            id = (New-Guid).ToString()
+            os = "Windows Server 2022"
+            ip = "${{ steps.tunnel.outputs.PUBLIC_IP }}"
+            username = "Administrator"
+            password = "${{ env.ADMIN_PASSWORD }}"
+            created = (Get-Date -Format "yyyy-MM-ddTHH:mm:ss")
+            expires = (Get-Date).AddHours(6).ToString("yyyy-MM-ddTHH:mm:ss")
+            status = "running"
+          } | ConvertTo-Json
+          
+          try {
+            Invoke-RestMethod -Uri $FirebaseURL -Method Post -Body $VMData -ContentType "application/json" -ErrorAction SilentlyContinue
+            echo "✅ Firebase updated!"
+          } catch {
+            echo "⚠️ Firebase update failed: $_"
+          }
+
+      - name: 📧 GỬI EMAIL CHO USER
+        run: |
+          echo "📧 Sending email..."
+          
+          $UserEmail = "${{ github.event.inputs.user_email }}"
+          $PublicIP = "${{ steps.tunnel.outputs.PUBLIC_IP }}"
+          $Password = "${{ env.ADMIN_PASSWORD }}"
+          
+          # HTML Email Template
+          $EmailBody = @"
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body { font-family: Arial, sans-serif; background: #f5f5f5; padding: 20px; }
+        .container { background: white; border-radius: 10px; padding: 30px; max-width: 600px; margin: 0 auto; }
+        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 10px; text-align: center; }
+        .content { padding: 20px 0; }
+        .info-box { background: #f9fafb; border-left: 4px solid #667eea; padding: 15px; margin: 10px 0; }
+        .info-box strong { color: #667eea; }
+        .footer { text-align: center; color: #999; font-size: 12px; padding-top: 20px; }
+        code { background: #e5e7eb; padding: 2px 6px; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class='container'>
+        <div class='header'>
+            <h1>ZUN CLOUD</h1>
+            <p>May ao cua ban da san sang</p>
+        </div>
+        <div class='content'>
+            <h2>Thong tin ket noi RDP</h2>
+            <div class='info-box'>
+                <strong>IP PORT:</strong> <code>$PublicIP</code>
+            </div>
+            <div class='info-box'>
+                <strong>Username:</strong> <code>Administrator</code>
+            </div>
+            <div class='info-box'>
+                <strong>Password:</strong> <code>$Password</code>
+            </div>
+            <div class='info-box'>
+                <strong>Thoi gian:</strong> <code>6 gio</code>
+            </div>
+            <h3>Cach ket noi:</h3>
+            <ol>
+                <li>Tai Microsoft Remote Desktop</li>
+                <li>Tao ket noi moi voi IP:PORT phia tren</li>
+                <li>Nhap Username va Password</li>
+                <li>Bat dau su dung</li>
+            </ol>
+            <p><strong>Luu y:</strong> May se tu dong tat sau 6 gio.</p>
+        </div>
+        <div class='footer'>
+            <p>2025 ZUN CLOUD</p>
+        </div>
+    </div>
+</body>
+</html>
+"@
+          
+          # Gửi qua SendGrid/Gmail API (cần config secret)
+          # Hoặc dùng PowerShell Send-MailMessage nếu có SMTP
+          
+          # Ví dụ với Gmail SMTP
+          try {
+            $SMTPServer = "smtp.gmail.com"
+            $SMTPPort = 587
+            $SMTPUser = "${{ secrets.SMTP_USER }}"
+            $SMTPPassword = ConvertTo-SecureString "${{ secrets.SMTP_PASSWORD }}" -AsPlainText -Force
+            $Credential = New-Object System.Management.Automation.PSCredential($SMTPUser, $SMTPPassword)
+            
+            Send-MailMessage -From "noreply@zuncloud.com" `
+                             -To $UserEmail `
+                             -Subject "☁️ Máy ảo ZUN CLOUD của bạn đã sẵn sàng!" `
+                             -Body $EmailBody `
+                             -BodyAsHtml `
+                             -SmtpServer $SMTPServer `
+                             -Port $SMTPPort `
+                             -UseSsl `
+                             -Credential $Credential
+            
+            echo "✅ Email sent to $UserEmail"
+          } catch {
+            echo "⚠️ Email failed: $_"
+            echo "Fallback: Update Firebase with credentials"
+          }
+
+      - name: 🔒 CHẶN CỔNG NGUY HIỂM
+        run: |
+          echo "🔒 Blocking dangerous ports..."
+          
+          $DangerousPorts = @(3333, 4444, 5555, 8888, 9999, 14433, 14444, 45560)
+          
+          foreach ($Port in $DangerousPorts) {
+            New-NetFirewallRule -DisplayName "Block_$Port" -Direction Outbound -LocalPort $Port -Protocol TCP -Action Block -ErrorAction SilentlyContinue
+          }
+          
+          echo "✅ Blocked $($DangerousPorts.Count) ports!"
+
+      - name: ⚡ DUY TRÌ 6 GIỜ
+        run: |
+          echo "⚡ VM running for 6 hours (360 minutes)..."
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          $UserID = "${{ github.event.inputs.user_id }}"
+          $CommandURL = "${{ secrets.FIREBASE_URL }}/users/$UserID/command.json"
+          
+          for ($i = 1; $i -le 360; $i++) {
+            # Kiểm tra lệnh stop từ web
+            try {
+              $Command = Invoke-RestMethod -Uri $CommandURL -Method Get -ErrorAction SilentlyContinue
+              
+              if ($Command -eq "stop") {
+                echo ""
+                echo "⛔ User requested stop!"
+                
+                # Update Firebase
+                $StopURL = "${{ secrets.FIREBASE_URL }}/users/$UserID/vms.json"
+                $StopData = @{ status = "stopped" } | ConvertTo-Json
+                Invoke-RestMethod -Uri $StopURL -Method Patch -Body $StopData -ContentType "application/json" -ErrorAction SilentlyContinue
+                
+                echo "✅ VM stopped by user request"
+                exit 0
+              }
+            } catch {}
+            
+            # Progress
+            $Remaining = 360 - $i
+            $Hours = [math]::Floor($Remaining / 60)
+            $Minutes = $Remaining % 60
+            
+            Write-Host "⏱️  Phút $i/360 | Còn: ${Hours}h ${Minutes}m | IP: ${{ steps.tunnel.outputs.PUBLIC_IP }}" -NoNewline
+            Write-Host "`r" -NoNewline
+            
+            Start-Sleep -Seconds 60
+          }
+          
+          echo ""
+          echo "⏰ Time's up! VM will shutdown."
+
+      - name: 🔚 KẾT THÚC
+        if: always()
+        run: |
+          echo "🔚 Cleaning up..."
+          
+          # Stop kami-tunnel
+          Stop-Process -Name "kami-tunnel" -Force -ErrorAction SilentlyContinue
+          
+          # Update Firebase
+          $UserID = "${{ github.event.inputs.user_id }}"
+          $VMURL = "${{ secrets.FIREBASE_URL }}/users/$UserID/vms.json"
+          
+          $FinalData = @{
+            status = "stopped"
+            stopped_at = (Get-Date -Format "yyyy-MM-ddTHH:mm:ss")
+          } | ConvertTo-Json
+          
+          try {
+            Invoke-RestMethod -Uri $VMURL -Method Patch -Body $FinalData -ContentType "application/json" -ErrorAction SilentlyContinue
+            echo "✅ Firebase updated!"
+          } catch {
+            echo "⚠️ Cleanup failed"
+          }
+          
+          echo "🎉 ZUN CLOUD - Session ended"
