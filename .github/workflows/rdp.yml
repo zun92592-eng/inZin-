@@ -1,0 +1,270 @@
+name: Create RDP VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      user_id:
+        description: 'User ID from Firebase'
+        required: true
+      user_email:
+        description: 'User Email'
+        required: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+    - name: Initialize
+      run: |
+        Write-Host "=========================================="
+        Write-Host "   ZUN CLOUD - VM Provisioning Started   "
+        Write-Host "=========================================="
+        Write-Host "User ID: ${{ github.event.inputs.user_id }}"
+        Write-Host "Email: ${{ github.event.inputs.user_email }}"
+        Write-Host "OS: Windows Server 2022"
+        Write-Host "Duration: 6 hours"
+        Write-Host "=========================================="
+
+    - name: Create Administrator Account
+      run: |
+        # Generate random password
+        $Password = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 12 | ForEach-Object {[char]$_})
+        $SecurePassword = ConvertTo-SecureString "Admin-$Password" -AsPlainText -Force
+        
+        # Create user
+        New-LocalUser -Name "Administrator" -Password $SecurePassword -FullName "Admin User" -Description "ZUN CLOUD Admin" -ErrorAction SilentlyContinue
+        Add-LocalGroupMember -Group "Administrators" -Member "Administrator" -ErrorAction SilentlyContinue
+        
+        # Enable account
+        Enable-LocalUser -Name "Administrator"
+        
+        # Save password to environment
+        echo "ADMIN_PASSWORD=Admin-$Password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        
+        Write-Host "Administrator account created successfully"
+        Write-Host "Username: Administrator"
+        Write-Host "Password: Admin-$Password"
+
+    - name: Configure RDP
+      run: |
+        # Enable RDP
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
+        
+        # Enable RDP through firewall
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        
+        # Disable Network Level Authentication (easier connection)
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 0
+        
+        Write-Host "RDP configured successfully"
+
+    - name: Setup Kami Tunnel
+      id: tunnel
+      run: |
+        # Download kami-tunnel
+        Write-Host "Downloading kami-tunnel..."
+        Invoke-WebRequest -Uri "https://github.com/kami2k1/tunnel/releases/latest/download/kami-tunnel-windows-amd64.tar.gz" -OutFile "kami-tunnel.tar.gz"
+        
+        # Extract
+        Write-Host "Extracting..."
+        tar -xzf kami-tunnel.tar.gz
+        
+        # Run tunnel in background
+        Write-Host "Starting tunnel on port 3389..."
+        Start-Process -FilePath ".\kami-tunnel.exe" -ArgumentList "3389" -RedirectStandardOutput "tunnel-output.txt" -NoNewWindow
+        
+        # Wait for tunnel to start
+        Start-Sleep -Seconds 10
+        
+        # Get public IP:PORT from output
+        $Output = Get-Content "tunnel-output.txt" -Raw
+        if ($Output -match '(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+)') {
+            $PublicIP = $Matches[1]
+            Write-Host "Tunnel started successfully!"
+            Write-Host "Public IP:PORT: $PublicIP"
+            echo "PUBLIC_IP=$PublicIP" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        } else {
+            Write-Host "Failed to get public IP"
+            echo "PUBLIC_IP=Failed" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        }
+
+    - name: Update Firebase
+      run: |
+        $UserID = "${{ github.event.inputs.user_id }}"
+        $FirebaseURL = "${{ secrets.FIREBASE_URL }}/users/$UserID/vms.json"
+        
+        $VMData = @{
+          id = (New-Guid).ToString()
+          os = "Windows Server 2022"
+          ip = "${{ steps.tunnel.outputs.PUBLIC_IP }}"
+          username = "Administrator"
+          password = "${{ env.ADMIN_PASSWORD }}"
+          created = (Get-Date -Format "yyyy-MM-ddTHH:mm:ss")
+          expires = (Get-Date).AddHours(6).ToString("yyyy-MM-ddTHH:mm:ss")
+          status = "running"
+        } | ConvertTo-Json
+        
+        try {
+          Invoke-RestMethod -Uri $FirebaseURL -Method Post -Body $VMData -ContentType "application/json"
+          Write-Host "Firebase updated successfully"
+        } catch {
+          Write-Host "Firebase update failed: $_"
+        }
+
+    - name: Send Email via SendGrid
+      run: |
+        $UserEmail = "${{ github.event.inputs.user_email }}"
+        $PublicIP = "${{ steps.tunnel.outputs.PUBLIC_IP }}"
+        $Password = "${{ env.ADMIN_PASSWORD }}"
+        
+        $EmailHTML = @"
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+body { font-family: Arial, sans-serif; background: #f5f5f5; padding: 20px; }
+.container { background: white; border-radius: 10px; padding: 30px; max-width: 600px; margin: 0 auto; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+.header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 25px; border-radius: 10px; text-align: center; margin-bottom: 20px; }
+.header h1 { margin: 0; font-size: 28px; }
+.header p { margin: 10px 0 0 0; opacity: 0.9; }
+.content { padding: 10px 0; }
+.info-box { background: #f9fafb; border-left: 4px solid #667eea; padding: 15px; margin: 15px 0; border-radius: 5px; }
+.info-box strong { color: #667eea; display: block; margin-bottom: 5px; }
+.info-box code { background: #e5e7eb; padding: 5px 10px; border-radius: 4px; font-family: monospace; display: inline-block; margin-top: 5px; }
+.footer { text-align: center; color: #999; font-size: 12px; padding-top: 20px; border-top: 1px solid #eee; margin-top: 30px; }
+h2 { color: #333; margin-bottom: 15px; }
+h3 { color: #555; margin-top: 20px; margin-bottom: 10px; }
+ol { padding-left: 20px; }
+li { margin-bottom: 8px; color: #666; }
+</style>
+</head>
+<body>
+<div class='container'>
+<div class='header'>
+<h1>ZUN CLOUD</h1>
+<p>May ao cua ban da san sang su dung!</p>
+</div>
+<div class='content'>
+<h2>Thong tin ket noi RDP</h2>
+<div class='info-box'>
+<strong>IP:PORT</strong>
+<code>$PublicIP</code>
+</div>
+<div class='info-box'>
+<strong>Username</strong>
+<code>Administrator</code>
+</div>
+<div class='info-box'>
+<strong>Password</strong>
+<code>$Password</code>
+</div>
+<div class='info-box'>
+<strong>Thoi gian su dung</strong>
+<code>6 gio</code>
+</div>
+<h3>Cach ket noi:</h3>
+<ol>
+<li>Tai <strong>Microsoft Remote Desktop</strong> (Windows/Mac/Mobile)</li>
+<li>Tao ket noi moi voi IP:PORT phia tren</li>
+<li>Nhap Username va Password</li>
+<li>Bat dau su dung!</li>
+</ol>
+<p><strong>Luu y:</strong> May se tu dong tat sau 6 gio.</p>
+</div>
+<div class='footer'>
+<p>2025 ZUN CLOUD - Cloud VPS Platform</p>
+</div>
+</div>
+</body>
+</html>
+"@
+
+        # SendGrid API
+        $SendGridAPIKey = "${{ secrets.SENDGRID_API_KEY }}"
+        
+        if ($SendGridAPIKey) {
+          $Body = @{
+            personalizations = @(@{
+              to = @(@{ email = $UserEmail })
+            })
+            from = @{
+              email = "noreply@zuncloud.com"
+              name = "ZUN CLOUD"
+            }
+            subject = "May ao ZUN CLOUD da san sang"
+            content = @(@{
+              type = "text/html"
+              value = $EmailHTML
+            })
+          } | ConvertTo-Json -Depth 10
+          
+          try {
+            Invoke-RestMethod -Uri "https://api.sendgrid.com/v3/mail/send" -Method Post -Headers @{
+              "Authorization" = "Bearer $SendGridAPIKey"
+              "Content-Type" = "application/json"
+            } -Body $Body
+            Write-Host "Email sent via SendGrid successfully"
+          } catch {
+            Write-Host "SendGrid failed: $_"
+          }
+        } else {
+          Write-Host "No SendGrid API key configured"
+        }
+
+    - name: Block Common Ports
+      run: |
+        Write-Host "Blocking common exploit ports..."
+        $PortsToBlock = @(3333, 4444, 5555, 8888, 9999, 14433, 14444, 45560)
+        
+        foreach ($Port in $PortsToBlock) {
+          New-NetFirewallRule -DisplayName "Block Port $Port" -Direction Inbound -LocalPort $Port -Protocol TCP -Action Block -ErrorAction SilentlyContinue
+          Write-Host "Blocked port: $Port"
+        }
+
+    - name: Maintain Connection (6 hours)
+      run: |
+        Write-Host "VM is running. Will maintain for 6 hours..."
+        Write-Host "You can connect via RDP now!"
+        
+        $EndTime = (Get-Date).AddHours(6)
+        
+        while ((Get-Date) -lt $EndTime) {
+          $Remaining = ($EndTime - (Get-Date)).TotalMinutes
+          Write-Host "Time remaining: $([math]::Round($Remaining)) minutes"
+          
+          # Check for stop command from Firebase
+          try {
+            $StopCheck = Invoke-RestMethod -Uri "${{ secrets.FIREBASE_URL }}/users/${{ github.event.inputs.user_id }}/stop.json"
+            if ($StopCheck -eq $true) {
+              Write-Host "Stop command received from Firebase"
+              break
+            }
+          } catch {
+            # Ignore errors
+          }
+          
+          Start-Sleep -Seconds 60
+        }
+        
+        Write-Host "Session ended. VM will shutdown soon."
+
+    - name: Cleanup
+      if: always()
+      run: |
+        Write-Host "Cleaning up..."
+        
+        # Stop tunnel
+        Stop-Process -Name "kami-tunnel" -Force -ErrorAction SilentlyContinue
+        
+        # Update Firebase status
+        try {
+          $UpdateData = @{ status = "stopped" } | ConvertTo-Json
+          Invoke-RestMethod -Uri "${{ secrets.FIREBASE_URL }}/users/${{ github.event.inputs.user_id }}/vms.json" -Method Patch -Body $UpdateData -ContentType "application/json"
+        } catch {
+          Write-Host "Failed to update Firebase: $_"
+        }
+        
+        Write-Host "Cleanup completed"
+        Write-Host "Thank you for using ZUN CLOUD!"
